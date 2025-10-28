@@ -1,18 +1,32 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import pytorch_lightning as pl
 
-'''
-    TO DO:
-    - cell a conv2d kernel/stride
-    - add Ln
-'''
 
 def squash(s):
     sq_norm = (s**2).sum(-1, keepdim=True)
     v = (sq_norm / (1 + sq_norm)) * (s / torch.sqrt(sq_norm + 1e-8))
     return v
+
+
+def routing(U, routingIterations):
+    batch, d1, d2, d3, d4 = U.shape
+    b = torch.zeros(batch, d1, d2, d3, device=U.device)
     
+    for r in range(routingIterations):
+        c = F.softmax(b, dim=-1)   #(b, d1, d2, d3)
+
+        c = c.unsqueeze(-1)       #(b, d1, d2, d3, 1)
+        s = (c * U).sum(dim=2)
+        v = squash(s)
+
+        a = (U * v.unsqueeze(1)).sum(-1)  # agreement
+        b = b + a.detach()
+        
+    return v
+        
+
 
 class Cell_A(nn.Module):
     def __init__(self, k, cp, ap, g2, cSA, aSA, g3):
@@ -22,8 +36,17 @@ class Cell_A(nn.Module):
         self.cp, self.ap, self.g2 = cp, ap, g2
         self.cSA, self.aSA, self.g3 = cSA, aSA, g3
 
-        self.conv1 = nn.Conv1d(k, self.cp * self.ap, kernel_size=g2, stride=1, padding = 'same')  # ask
-        self.conv2 = nn.Conv2d(1, self.cSA * self.aSA, kernel_size=(self.g3, self.ap), stride=(1, self.ap), padding = 'same')
+        self.conv1 = nn.Conv1d(
+            k, self.cp * self.ap, 
+            kernel_size=g2, 
+            stride=1, 
+            padding = 'same')  # ask
+        
+        self.conv2 = nn.Conv2d(
+            1, self.cSA * self.aSA, 
+            kernel_size=(self.g3, self.ap), 
+            stride=(1, self.ap), 
+            padding = 'same')
         
 
     def forward(self, x):
@@ -33,8 +56,8 @@ class Cell_A(nn.Module):
         x = x.view(x.size(0), x.size(1), self.cp * self.ap, 1)         #[L, cp*ap, 1]
         x = self.conv2(x)                                              #[L, cp, cSA*aSA]
         x = x.view(x.size(0), x.size(1), self.cp, self.cSA * self.aSA) #[L, cp, cSA, aSA]
-        #ROUTING                                                       #[L, cSA, aSA]
-        #flatten                                                       #[L*cSA, aSA]
+        x = routing(x, routIter)                                        #[L, cSA, aSA]
+        x = x.view(x.size(0), self.L * self.cSA, self.aSA)              #[L*cSA, aSA]
         return x
         
     
@@ -70,8 +93,9 @@ class Cell_B(nn.Module):
         x = x.view(x.size(0), self.Ln, self.n * self.cb * self.ab, 1)   #[L/n. n*cb*ab, 1]
         x = self.conv2(x)                                               #[L/n, n, cSB*aSB]
         x = x.view(x.size(0), self.Ln, self.cSB, self.aSB, self.n)      #[L/n, cSB, aSB, n]
-        #ROUTING
-        #flatten
+        x = routing(x, routIter)                                        #[L/n, cSB, aSB]
+        x = x.view(x.size(0), self.Ln * self.cSB, self.aSB)             #[l/n*cSb, aSB]
+        return x
 
 
 
@@ -83,6 +107,8 @@ class TimeCaps(pl.LightningModule):
         self.cp, self.ap, self.g2 = cp, ap, g2
         self.cSA, self.aSA, self.g3 = cSA, aSA, g3
         self.cb, self.ab = cb, ab
+
+        assert L % n == 0,
 
         self.conv1 = nn.conv1d(1, k, kernel_size=g1, stride=1, padding = 'same')
         
@@ -99,5 +125,15 @@ class TimeCaps(pl.LightningModule):
         X_A = self.cell_A(X)
         X_B = self.cell_B(X)
         #x = concat(X_A, X_B)
-        #...
+        return x
+
+    def configure_optimizers(self):
+        return optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-5) 
+
+    
+
+
+
+
+    
 
