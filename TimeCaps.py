@@ -37,10 +37,10 @@ class Cell_A(nn.Module):
         self.cSA, self.aSA, self.g3 = cSA, aSA, g3
 
         self.conv1 = nn.Conv1d(
-            k, self.cp * self.ap, 
+            k, self.cp * self.ap,
             kernel_size=g2, 
             stride=1, 
-            padding = 'same')  # ask
+            padding = 'same') 
         
         self.conv2 = nn.Conv2d(
             1, self.cSA * self.aSA, 
@@ -49,13 +49,15 @@ class Cell_A(nn.Module):
             padding = 'same')
         
 
-    def forward(self, x):
-        x = self.conv1(x)                                              #[L, cp*ap]
-        x = x.view(x.size(0), x.size(1), self.cp, self.ap)             #[L, cp, ap]
+    def forward(self, x):                                              #[k, L] -
+        x = self.conv1(x)                                              #[cp*ap, L] -
+        # fix this (solves the problem)                                #[L, cp*ap] -> [L, cp, ap]
         x = squash(x)
-        x = x.view(x.size(0), x.size(1), self.cp * self.ap, 1)         #[L, cp*ap, 1]
+        
+        x = x.view(x.size(0), self.L, self.cp * self.ap, 1)            #[L, cp*ap, 1]
         x = self.conv2(x)                                              #[L, cp, cSA*aSA]
-        x = x.view(x.size(0), x.size(1), self.cp, self.cSA * self.aSA) #[L, cp, cSA, aSA]
+        
+        x = x.view(x.size(0), x.size(1), self.cp, self.cSA * self.aSA)  #[L, cp, cSA, aSA]
         x = routing(x, routIter)                                        #[L, cSA, aSA]
         x = x.view(x.size(0), self.L * self.cSA, self.aSA)              #[L*cSA, aSA]
         return x
@@ -83,16 +85,18 @@ class Cell_B(nn.Module):
             1, self.cSB * self.aSB, 
             kernel_size=(self.g3, self.cb * self.ab), 
             stride=(cb * ab, 1), 
-            padding = 'same')
+            padding = 'same')  #fix
 
-    def forward(delf, x):                                               #[L, k]
-        x = self.convLayer(x)                                           #[L, cb]
-        x = self.conv1(x)                                               #[L, cb*ab]
-        x = x.view(x.size(0), self.Ln, self.n, self.cb * self.ab)       #[l/n, n, cb*ab]
-        x = squash(x)
+    def forward(delf, x):                                               #[k, L] -
+        x = self.convLayer(x)                                           #[cb, L] -
+        
+        x = self.conv1(x)                                               #[cb*ab, L] -
+        x = x.view(x.size(0), self.Ln, self.n, self.cb * self.ab)       #[l/n, n, cb*ab] #fix
+        x = squash(x)  #squash along the full set of feature maps
+        
         x = x.view(x.size(0), self.Ln, self.n * self.cb * self.ab, 1)   #[L/n. n*cb*ab, 1]
         x = self.conv2(x)                                               #[L/n, n, cSB*aSB]
-        x = x.view(x.size(0), self.Ln, self.cSB, self.aSB, self.n)      #[L/n, cSB, aSB, n]
+        x = x.view(x.size(0), self.Ln, self.cSB, self.aSB, self.n)      #[L/n, cSB, aSB, n] ?
         x = routing(x, routIter)                                        #[L/n, cSB, aSB]
         x = x.view(x.size(0), self.Ln * self.cSB, self.aSB)             #[l/n*cSb, aSB]
         return x
@@ -119,19 +123,54 @@ class TimeCaps(pl.LightningModule):
             k=self.k, cb=self.cb, ab=self.ab, g2=self.g2, g3=self.g3, Ln=self.Ln, n=self.n, cSB=self.cSB, aSB=self.aSB, gB=self.gB
         )
 
+        self.alpha = nn.Parameter(torch.tensor(0.5))
+        self.beta = nn.Parameter(torch.tensor(0.5))
+ 
+
     
     def forward(self, x):
-        X = self.conv1(x)
+        X = self.conv1(x)   #[k,L] -
         X_A = self.cell_A(X)
         X_B = self.cell_B(X)
         #x = concat(X_A, X_B)
         return x
 
+
     def configure_optimizers(self):
         return optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-5) 
 
-    
+    '''
+    def concat(cell_A, cell_B):
+        return torch.cat(
+    '''
 
+    # margin loss
+    def lossF(self, out, y, m_plus=0.9, m_minus=0.1, λ=0.5):
+        y_onehot = F.one_hot(y, num_classes=out.size(1)).float()
+        norm = torch.norm(out, dim=-1)
+        loss = y_onehot * F.relu(m_plus - norm)**2 + λ * (1 - y_onehot) * F.relu(norm - m_minus)**2
+        return loss.sum(dim=1).mean()
+
+    
+# ------------------- Train -------------------------------------------
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        x = x.view(x.size(0), -1)
+        out = self(x)
+        
+        loss = self.lossF(out, y)
+        self.log("train_loss", loss)
+
+        preds = torch.norm(out, dim=-1).argmax(dim=1)
+        acc = (preds == y).float().mean()
+        self.log("train_acc", acc)
+
+        return loss   
+        
+    def on_train_epoch_end(self):
+        avg_loss = self.trainer.callback_metrics["train_loss"].item()
+        train_acc = self.trainer.callback_metrics["train_acc"].item()
+        print(f"Epoch: {self.current_epoch}, Loss: {avg_loss:.4f}, Accuracy: {train_acc*100:.2f}%")
 
 
 
