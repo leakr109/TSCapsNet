@@ -10,18 +10,18 @@ def squash(s):
     return v
 
 
-def routing(U, routingIterations):
-    batch, d1, d2, d3, d4 = U.shape
+def routing(V, routingIterations):
+    batch, d1, d2, d3, d4 = V.shape  #(b, d1, d2, d3, d4)
     b = torch.zeros(batch, d1, d2, d3, device=U.device)
     
     for r in range(routingIterations):
-        c = F.softmax(b, dim=-1)   #(b, d1, d2, d3)
+        c = F.softmax(b, dim=-1)   #(b, d1, d2, d3) -
 
-        c = c.unsqueeze(-1)       #(b, d1, d2, d3, 1)
-        s = (c * U).sum(dim=2)
+        c = c.unsqueeze(-1)       #(b, d1, d2, d3, 1) * V ,skalar se pomnoži z vektorji
+        s = (c * V).sum(dim=2)    #(b, d1, d3, d4)
         v = squash(s)
 
-        a = (U * v.unsqueeze(1)).sum(-1)  # agreement
+        a = (V * v.unsqueeze(2)).sum(-1)  # agreement  (b, d1, d2, d3)
         b = b + a.detach()
         
     return v
