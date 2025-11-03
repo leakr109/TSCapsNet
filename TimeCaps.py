@@ -46,20 +46,23 @@ class Cell_A(nn.Module):
             1, self.cSA * self.aSA, 
             kernel_size=(self.g3, self.ap), 
             stride=(1, self.ap), 
-            padding = 'same')
+            padding = 'same')  #fix padding
         
 
-    def forward(self, x):                                              #[k, L] -
-        x = self.conv1(x)                                              #[cp*ap, L] -
-        # fix this (solves the problem)                                #[L, cp*ap] -> [L, cp, ap]
+    def forward(self, x):                                                     #[k, L] -
+        # primary caps
+        x = self.conv1(x)                                                     #[cp*ap, L] -
+        x = x.permute(0, 2, 1).view(x.size(0), self.L, self.cp, self.ap)      #[L, cp*ap] -> [L, cp, ap] -
         x = squash(x)
-        
-        x = x.view(x.size(0), self.L, self.cp * self.ap, 1)            #[L, cp*ap, 1]
-        x = self.conv2(x)                                              #[L, cp, cSA*aSA]
-        
-        x = x.view(x.size(0), x.size(1), self.cp, self.cSA * self.aSA)  #[L, cp, cSA, aSA]
-        x = routing(x, routIter)                                        #[L, cSA, aSA]
-        x = x.view(x.size(0), self.L * self.cSA, self.aSA)              #[L*cSA, aSA]
+
+        # time caps
+        x = x.view(x.size(0), self.L, self.cp * self.ap).unsqueeze(1)     #[1, L, cp*ap] -
+        x = self.conv2(x)                                                 #[cSA*aSA, L, cp] -
+
+        # votes
+        x = x.permute(0,2,3,1).view(x.size(0), self.L, self.cp, self.cSA, self.aSA)    #[L, cp, cSA, aSA] -
+        x = routing(x, routIter)                                                       #[L, cSA, aSA] -
+        x = x.view(x.size(0), self.L * self.cSA, self.aSA)                             #[L*cSA, aSA] -
         return x
         
     
