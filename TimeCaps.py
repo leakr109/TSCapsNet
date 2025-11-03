@@ -25,7 +25,7 @@ def routing(V, routingIterations):
         b = b + a.detach()
         
     return v
-        
+
 
 
 class Cell_A(nn.Module):
@@ -49,19 +49,19 @@ class Cell_A(nn.Module):
             padding = 'same')  #fix padding
         
 
-    def forward(self, x):                                                     #[k, L] -
+    def forward(self, x):                                                  #[k, L] -
         # primary caps
-        x = self.conv1(x)                                                     #[cp*ap, L] -
-        x = x.permute(0, 2, 1).view(x.size(0), self.L, self.cp, self.ap)      #[L, cp*ap] -> [L, cp, ap] -
+        x = self.conv1(x)                                                  #[cp*ap, L] -
+        x = x.permute(0,2,1).view(x.size(0), self.L, self.cp, self.ap)     #[L, cp*ap] -> [L, cp, ap] -
         x = squash(x)
-
+        x = x.view(x.size(0), self.L, self.cp * self.ap).unsqueeze(1)      #[1, L, cp*ap] -
+        
         # time caps
-        x = x.view(x.size(0), self.L, self.cp * self.ap).unsqueeze(1)     #[1, L, cp*ap] -
-        x = self.conv2(x)                                                 #[cSA*aSA, L, cp] -
-
-        # votes
+        x = self.conv2(x)                                                              #[cSA*aSA, L, cp] -
         x = x.permute(0,2,3,1).view(x.size(0), self.L, self.cp, self.cSA, self.aSA)    #[L, cp, cSA, aSA] -
         x = routing(x, routIter)                                                       #[L, cSA, aSA] -
+        
+        # flatten
         x = x.view(x.size(0), self.L * self.cSA, self.aSA)                             #[L*cSA, aSA] -
         return x
         
@@ -76,7 +76,7 @@ class Cell_B(nn.Module):
         self.Ln, self.n = Ln, n
         self.cSB, self.cSA = cSB, aSB
 
-        self.convLayer = nn.Conv1d(k, self.cb, kernel_size=1, padding = 'same')  #ask
+        self.convLayer = nn.Conv1d(k, self.cb, kernel_size=1)  #ask
         
         self.conv1 = nn.Conv1d(
             self.cb, self.cb * self.ab, 
@@ -89,19 +89,24 @@ class Cell_B(nn.Module):
             kernel_size=(self.g3, self.cb * self.ab), 
             stride=(cb * ab, 1), 
             padding = 'same')  #fix
+        
 
-    def forward(delf, x):                                               #[k, L] -
-        x = self.convLayer(x)                                           #[cb, L] -
-        
-        x = self.conv1(x)                                               #[cb*ab, L] -
-        x = x.view(x.size(0), self.Ln, self.n, self.cb * self.ab)       #[l/n, n, cb*ab] #fix
+    def forward(delf, x):        #[k, L] -
+        x = self.convLayer(x)    #[cb, L] -
+
+        # primary caps
+        x = self.conv1(x)                                                           #[cb*ab, L] -
+        x = x.permute(0,2,1).view(x.size(0), self.Ln, self.n, self.cb * self.ab)    #[l/n, n, cb*ab] -
         x = squash(x)  #squash along the full set of feature maps
+        x = x.view(x.size(0), self.Ln, self.n * self.cb * self.ab).unsqueeze(1)     #[1, L/n, n*cb*ab] -
         
-        x = x.view(x.size(0), self.Ln, self.n * self.cb * self.ab, 1)   #[L/n. n*cb*ab, 1]
-        x = self.conv2(x)                                               #[L/n, n, cSB*aSB]
-        x = x.view(x.size(0), self.Ln, self.cSB, self.aSB, self.n)      #[L/n, cSB, aSB, n] ?
-        x = routing(x, routIter)                                        #[L/n, cSB, aSB]
-        x = x.view(x.size(0), self.Ln * self.cSB, self.aSB)             #[l/n*cSb, aSB]
+        # time caps
+        x = self.conv2(x)                                                               #[cSB*aSB, L/n, n] -
+        x = x.permute(0,2,3,1).view(x.size(0), self.Ln, self.n, self.cSB, self.aSB)     #[L/n, n, cSB, aSB] ? -
+        x = routing(x, routIter)                                                        #[L/n, cSB, aSB] -
+        
+        # flatten
+        x = x.view(x.size(0), self.Ln * self.cSB, self.aSB)                             #[l/n*cSb, aSB] -
         return x
 
 
