@@ -12,7 +12,7 @@ def squash(s):
 
 def routing(V, routingIterations):
     batch, d1, d2, d3, d4 = V.shape  #(b, d1, d2, d3, d4)
-    b = torch.zeros(batch, d1, d2, d3, device=U.device)
+    b = torch.zeros(batch, d1, d2, d3, device=V.device)
     
     for r in range(routingIterations):
         c = F.softmax(b, dim=-1)   #(b, d1, d2, d3) -
@@ -29,24 +29,26 @@ def routing(V, routingIterations):
 
 
 class Cell_A(nn.Module):
-    def __init__(self, k, cp, ap, g2, cSA, aSA, g3):
+    def __init__(self, L, k, cp, ap, g2, cSA, aSA, g3, routIter):
         super().__init__()
-        self.L = L
-        self.k, self.g1 = k, g1
+        self.L, self.k = L, k
         self.cp, self.ap, self.g2 = cp, ap, g2
         self.cSA, self.aSA, self.g3 = cSA, aSA, g3
+        self.routIter = routIter
 
         self.conv1 = nn.Conv1d(
             k, self.cp * self.ap,
             kernel_size=g2, 
             stride=1, 
             padding = 'same') 
+
+        pad = int(g3/2 - 0.5)
         
         self.conv2 = nn.Conv2d(
             1, self.cSA * self.aSA, 
             kernel_size=(self.g3, self.ap), 
             stride=(1, self.ap), 
-            padding = 'same')  #fix padding
+            padding = (pad, 0))
         
 
     def forward(self, x):                                                  #[k, L] -
@@ -59,7 +61,7 @@ class Cell_A(nn.Module):
         # time caps
         x = self.conv2(x)                                                              #[cSA*aSA, L, cp] -
         x = x.permute(0,2,3,1).view(x.size(0), self.L, self.cp, self.cSA, self.aSA)    #[L, cp, cSA, aSA] -
-        x = routing(x, routIter)                                                       #[L, cSA, aSA] -
+        x = routing(x, self.routIter)                                                       #[L, cSA, aSA] -
         
         # flatten
         x = x.view(x.size(0), self.L * self.cSA, self.aSA)                             #[L*cSA, aSA] -
@@ -68,30 +70,32 @@ class Cell_A(nn.Module):
     
 
 class Cell_B(nn.Module):
-    def __init__(self, cb, ab, g2, g3, Ln, n, cSB, aSB):
+    def __init__(self, L, k, n, cb, ab, g2, cSB, aSB, g3, routIter):
         super().__init__()
-        k=self.k
-        self.cb, self.ab = cb, ab
-        self.g2, self.g3 = g2, g3
-        self.Ln, self.n = Ln, n
-        self.cSB, self.cSA = cSB, aSB
+        self.L, self.k, self.n = L, k, n
+        self.cb, self.ab, self.g2 = cb, ab, g2
+        self.cSB, self.aSB, self.g3 = cSB, aSB, g3
+        self.routIter = routIter
+        self.Ln = L // n
 
-        self.convLayer = nn.Conv1d(k, self.cb, kernel_size=1)  #ask
+        self.convLayer = nn.Conv1d(self.k, self.cb, kernel_size=1)
         
         self.conv1 = nn.Conv1d(
             self.cb, self.cb * self.ab, 
             kernel_size=g2, 
             stride=1, 
             padding = 'same')
-        
+
+        pad = int(g3/2 - 0.5)
+
         self.conv2 = nn.Conv2d(
             1, self.cSB * self.aSB, 
             kernel_size=(self.g3, self.cb * self.ab), 
             stride=(cb * ab, 1), 
-            padding = 'same')  #fix
+            padding = (pad, 0))
         
 
-    def forward(delf, x):        #[k, L] -
+    def forward(self, x):        #[k, L] -
         x = self.convLayer(x)    #[cb, L] -
 
         # primary caps
@@ -103,7 +107,7 @@ class Cell_B(nn.Module):
         # time caps
         x = self.conv2(x)                                                               #[cSB*aSB, L/n, n] -
         x = x.permute(0,2,3,1).view(x.size(0), self.Ln, self.n, self.cSB, self.aSB)     #[L/n, n, cSB, aSB] ? -
-        x = routing(x, routIter)                                                        #[L/n, cSB, aSB] -
+        x = routing(x, self.routIter)                                                        #[L/n, cSB, aSB] -
         
         # flatten
         x = x.view(x.size(0), self.Ln * self.cSB, self.aSB)                             #[l/n*cSb, aSB] -
@@ -111,47 +115,75 @@ class Cell_B(nn.Module):
 
 
 
-class TimeCaps(pl.LightningModule):
-    def __init__(self, L, k, g1, ...):
+class ClassificationCapsules(nn.Module):
+    def __init__(self, prevNum, prevDim, capsNum, capsDim, routIter):
         super().__init__()
-        self.L = L
-        self.k, self.g1 = k, g1
-        self.cp, self.ap, self.g2 = cp, ap, g2
-        self.cSA, self.aSA, self.g3 = cSA, aSA, g3
-        self.cb, self.ab = cb, ab
+        self.prevNum, self.prevDim = prevNum, prevDim
+        self.capsNum, self.capsDim = capsNum, capsDim
+        self.routIter = routIter
 
-        assert L % n == 0,
+        self.W = nn.Parameter(0.01 * torch.randn(1, prevNum, capsNum, prevDim, capsDim))
 
-        self.conv1 = nn.conv1d(1, k, kernel_size=g1, stride=1, padding = 'same')
+        def forward(self, x):
+            x = squash(x)
+            x = x.unsqueeze(-2).unsqueeze(-2)
+            x = torch.matmul(x, self.W).squeeze(-2)
+            x = routing(x, self.routIter)
+            return x
+
+
+class TimeCaps(pl.LightningModule):
+    def __init__(self, L, k, n, g1, g2, g3, cp, ap, cSA, aSA, cb, ab, cSB, aSB, routingIterations, n_classes):
+        super().__init__()
+        self.L, self.k, self.n = L, k, n
+        self.g1, self.g2, self.g3 = g1, g2, g3
+        self.cp, self.ap, self.cSA, self.aSA = cp, ap, cSA, aSA
+        self.cb, self.ab, self.cSB, self.aSB = cb, ab, cSB, aSB
+        self.routIter = routingIterations
+        self.n_classes = n_classes
+
+        assert L % n == 0, '[Ln] needs to be divisible by [n]'
+        assert g3 % 2 != 0, '[g3] needs to be odd'
+        assert aSA == aSB, '[aSA] should be equal to [aSB]'
+
+        self.conv1 = nn.Conv1d(
+            1, k, 
+            kernel_size=g1, 
+            stride=1, 
+            padding = 'same'
+        )
         
         self.cell_A = Cell_A(
-            k=self.k, cp=self.cp, ap=self.ap, g2=self.g2, cSA=self.cSA, aSA=self.aSA, g3=self.g3
+            L=self.L, k=self.k, cp=self.cp, ap=self.ap, g2=self.g2, cSA=self.cSA, aSA=self.aSA, g3=self.g3, routIter=self.routIter
         )
         self.cell_B = Cell_B(
-            k=self.k, cb=self.cb, ab=self.ab, g2=self.g2, g3=self.g3, Ln=self.Ln, n=self.n, cSB=self.cSB, aSB=self.aSB, gB=self.gB
+            L = self.L, k=self.k, n=self.n, cb=self.cb, ab=self.ab, g2=self.g2, cSB=self.cSB, aSB=self.aSB, g3=self.g3, 
+            routIter=self.routIter
         )
+
+        self.classCaps = ClassificationCapsules(
+            prevNum=(L*cSA + L//n*cSB), prevDim=aSA, capsNum=n_classes, capsDim=16, routIter=self.routIter)
 
         self.alpha = nn.Parameter(torch.tensor(0.5))
         self.beta = nn.Parameter(torch.tensor(0.5))
  
 
-    
     def forward(self, x):
         X = self.conv1(x)   #[k,L] -
         X_A = self.cell_A(X)
         X_B = self.cell_B(X)
-        #x = concat(X_A, X_B)
-        return x
+        X = concat(X_A, X_B)
+        X = classCaps(X)
+        return X
 
 
     def configure_optimizers(self):
         return optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-5) 
 
-    '''
-    def concat(cell_A, cell_B):
-        return torch.cat(
-    '''
-
+    
+    def concat(X_A, X_B):  #[b, nCaps, dimCaps]
+        return torch.cat((X_A * self.alpha, X_B * self.beta), 2)
+    
     # margin loss
     def lossF(self, out, y, m_plus=0.9, m_minus=0.1, λ=0.5):
         y_onehot = F.one_hot(y, num_classes=out.size(1)).float()
@@ -180,7 +212,4 @@ class TimeCaps(pl.LightningModule):
         train_acc = self.trainer.callback_metrics["train_acc"].item()
         print(f"Epoch: {self.current_epoch}, Loss: {avg_loss:.4f}, Accuracy: {train_acc*100:.2f}%")
 
-
-
-    
 
