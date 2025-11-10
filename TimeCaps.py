@@ -11,18 +11,19 @@ def squash(s):
 
 
 def routing(V, routingIterations):
-    batch, d1, d2, d3, d4 = V.shape  #(b, d1, d2, d3, d4)
-    b = torch.zeros(batch, d1, d2, d3, device=V.device)
+    dims = V.shape    #(b, d1, d2, d3, d4)
+    b = torch.zeros(dims[:-1], device=V.device)
     
     for r in range(routingIterations):
         c = F.softmax(b, dim=-1)   #(b, d1, d2, d3) -
 
         c = c.unsqueeze(-1)       #(b, d1, d2, d3, 1) * V ,skalar se pomnoži z vektorji
-        s = (c * V).sum(dim=2)    #(b, d1, d3, d4)
+        s = (c * V).sum(dim=-3)    #(b, d1, d3, d4)
         v = squash(s)
 
-        a = (V * v.unsqueeze(2)).sum(-1)  # agreement  (b, d1, d2, d3)
-        b = b + a.detach()
+        if (r < routingIterations - 1):
+            a = (V * v.unsqueeze(-3)).sum(-1)  # agreement  (b, d1, d2, d3)
+            b = b + a.detach()
         
     return v
 
@@ -91,7 +92,7 @@ class Cell_B(nn.Module):
         self.conv2 = nn.Conv2d(
             1, self.cSB * self.aSB, 
             kernel_size=(self.g3, self.cb * self.ab), 
-            stride=(cb * ab, 1), 
+            stride=(1, cb * ab), 
             padding = (pad, 0))
         
 
@@ -102,7 +103,7 @@ class Cell_B(nn.Module):
         x = self.conv1(x)                                                           #[cb*ab, L] -
         x = x.permute(0,2,1).view(x.size(0), self.Ln, self.n, self.cb * self.ab)    #[l/n, n, cb*ab] -
         x = squash(x)  #squash along the full set of feature maps
-        x = x.view(x.size(0), self.Ln, self.n * self.cb * self.ab).unsqueeze(1)     #[1, L/n, n*cb*ab] -
+        x = x.contiguous().view(x.size(0), self.Ln, self.n * self.cb * self.ab).unsqueeze(1)     #[1, L/n, n*cb*ab] -
         
         # time caps
         x = self.conv2(x)                                                               #[cSB*aSB, L/n, n] -
@@ -124,12 +125,12 @@ class ClassificationCapsules(nn.Module):
 
         self.W = nn.Parameter(0.01 * torch.randn(1, prevNum, capsNum, prevDim, capsDim))
 
-        def forward(self, x):
-            x = squash(x)
-            x = x.unsqueeze(-2).unsqueeze(-2)
-            x = torch.matmul(x, self.W).squeeze(-2)
-            x = routing(x, self.routIter)
-            return x
+    def forward(self, x):
+        x = squash(x)
+        x = x.unsqueeze(-2).unsqueeze(-2)
+        x = torch.matmul(x, self.W).squeeze(-2)
+        x = routing(x, self.routIter)
+        return x
 
 
 class TimeCaps(pl.LightningModule):
@@ -172,8 +173,8 @@ class TimeCaps(pl.LightningModule):
         X = self.conv1(x)   #[k,L] -
         X_A = self.cell_A(X)
         X_B = self.cell_B(X)
-        X = concat(X_A, X_B)
-        X = classCaps(X)
+        X = self.concat(X_A, X_B)
+        X = self.classCaps(X)
         return X
 
 
@@ -181,8 +182,8 @@ class TimeCaps(pl.LightningModule):
         return optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-5) 
 
     
-    def concat(X_A, X_B):  #[b, nCaps, dimCaps]
-        return torch.cat((X_A * self.alpha, X_B * self.beta), 2)
+    def concat(self, X_A, X_B):  #[b, nCaps, dimCaps]
+        return torch.cat((X_A * self.alpha, X_B * self.beta), 1)
     
     # margin loss
     def lossF(self, out, y, m_plus=0.9, m_minus=0.1, λ=0.5):
