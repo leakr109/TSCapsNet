@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
+import torch.optim as optim
 
 
 def squash(s):
@@ -143,7 +144,10 @@ class TimeCaps(pl.LightningModule):
         self.routIter = routingIterations
         self.n_classes = n_classes
 
-        assert L % n == 0, '[Ln] needs to be divisible by [n]'
+        self.test_targets = []
+        self.test_preds = []
+
+        assert L % n == 0, '[L] needs to be divisible by [n]'
         assert g3 % 2 != 0, '[g3] needs to be odd'
         assert aSA == aSB, '[aSA] should be equal to [aSB]'
 
@@ -169,8 +173,9 @@ class TimeCaps(pl.LightningModule):
         self.beta = nn.Parameter(torch.tensor(0.5))
  
 
-    def forward(self, x):
-        X = self.conv1(x)   #[k,L] -
+    def forward(self, X):
+        X = X.unsqueeze(1)
+        X = self.conv1(X)   #[k,L] -
         X_A = self.cell_A(X)
         X_B = self.cell_B(X)
         X = self.concat(X_A, X_B)
@@ -179,14 +184,14 @@ class TimeCaps(pl.LightningModule):
 
 
     def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=1e-4, weight_decay=1e-5) 
+        return optim.Adam(self.parameters(), lr=0.001, weight_decay=1e-6) 
 
     
     def concat(self, X_A, X_B):  #[b, nCaps, dimCaps]
         return torch.cat((X_A * self.alpha, X_B * self.beta), 1)
     
     # margin loss
-    def lossF(self, out, y, m_plus=0.9, m_minus=0.1, λ=0.5):
+    def lossF(self, out, y, m_plus=0.8, m_minus=0.2, λ=0.5):
         y_onehot = F.one_hot(y, num_classes=out.size(1)).float()
         norm = torch.norm(out, dim=-1)
         loss = y_onehot * F.relu(m_plus - norm)**2 + λ * (1 - y_onehot) * F.relu(norm - m_minus)**2
@@ -200,17 +205,46 @@ class TimeCaps(pl.LightningModule):
         out = self(x)
         
         loss = self.lossF(out, y)
-        self.log("train_loss", loss)
+        self.log("train_loss", loss, on_step=False, on_epoch=True)
 
         preds = torch.norm(out, dim=-1).argmax(dim=1)
         acc = (preds == y).float().mean()
-        self.log("train_acc", acc)
+        self.log("train_acc", acc, on_step=False, on_epoch=True)
 
         return loss   
         
     def on_train_epoch_end(self):
-        avg_loss = self.trainer.callback_metrics["train_loss"].item()
-        train_acc = self.trainer.callback_metrics["train_acc"].item()
-        print(f"Epoch: {self.current_epoch}, Loss: {avg_loss:.4f}, Accuracy: {train_acc*100:.2f}%")
+        if (self.current_epoch % 10 == 0):
+            avg_loss = self.trainer.callback_metrics["train_loss"].item()
+            train_acc = self.trainer.callback_metrics["train_acc"].item()
+            print(f"Epoch: {self.current_epoch}, Loss: {avg_loss:.4f}, Accuracy: {train_acc*100:.2f}%")
 
+
+# ------------------- Test ---------------------------------------------
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        out = self(x)  # [batch, capsNum, capsDim]
+        
+        # loss
+        loss = self.lossF(out, y)
+        self.log("test_loss", loss)  
+        
+        # acc
+        preds = torch.norm(out, dim=-1).argmax(dim=1)
+        acc = (preds == y).float().mean()
+        self.log("test_acc", acc)
+
+        self.test_preds.extend(preds.cpu().numpy())  # report rabi np objekt na cpu
+        self.test_targets.extend(y.cpu().numpy())
+        
+
+    def on_test_epoch_end(self):
+        test_loss = self.trainer.callback_metrics["test_loss"].item()
+        test_acc = self.trainer.callback_metrics["test_acc"].item()
+        print(f"Loss: {test_loss:.4f}")
+        print(f"Accuracy: {test_acc*100:.2f}%")
+
+        report = classification_report(self.test_targets, self.test_preds, digits=4)
+        print("\n=== Classification Report ===")
+        print(report)
 
