@@ -132,9 +132,9 @@ class ClassificationCapsules(nn.Module):
         x = torch.matmul(x, self.W).squeeze(-2)
         x = routing(x, self.routIter)
         return x
+        
 
-
-class TimeCaps(pl.LightningModule):
+class Encoder(nn.Module):
     def __init__(self, L, k, n, g1, g2, g3, cp, ap, cSA, aSA, cb, ab, cSB, aSB, routingIterations, n_classes):
         super().__init__()
         self.L, self.k, self.n = L, k, n
@@ -143,9 +143,6 @@ class TimeCaps(pl.LightningModule):
         self.cb, self.ab, self.cSB, self.aSB = cb, ab, cSB, aSB
         self.routIter = routingIterations
         self.n_classes = n_classes
-
-        self.test_targets = []
-        self.test_preds = []
 
         assert L % n == 0, '[L] needs to be divisible by [n]'
         assert g3 % 2 != 0, '[g3] needs to be odd'
@@ -181,15 +178,87 @@ class TimeCaps(pl.LightningModule):
         X = self.concat(X_A, X_B)
         X = self.classCaps(X)
         return X
-
-
-    def configure_optimizers(self):
-        return optim.Adam(self.parameters(), lr=0.001, weight_decay=1e-6) 
-
+        
     
     def concat(self, X_A, X_B):  #[b, nCaps, dimCaps]
         return torch.cat((X_A * self.alpha, X_B * self.beta), 1)
     
+
+
+# ----------------------------------------------------------------------------------------------
+class Decoder(nn.Module):
+    def __init__(self, capsDim, L):
+        super().__init__()
+        # 2 fuly connected
+        self.FC = nn.Sequential(
+            nn.Linear(in_features=capsDim, out_features=512), nn.ReLU(),
+            nn.Linear(in_features=512, out_features=1024), nn.ReLU()
+        )
+
+        # reshape to (batch, channels=32, length=32)
+        self.channels = 32
+        self.initial_len = 32
+
+        # decoder CNN (upsample → conv)
+        self.deconvs = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="linear", align_corners=False),
+            nn.Conv1d(32, 32, kernel_size=5, padding=2), nn.ReLU(),
+
+            nn.Upsample(scale_factor=2, mode="linear", align_corners=False),
+            nn.Conv1d(32, 16, kernel_size=5, padding=2), nn.ReLU(),
+
+            nn.Conv1d(16, 8, kernel_size=3, padding=1), nn.ReLU(),
+            nn.Conv1d(8, 1, kernel_size=3, padding=1)
+        )
+
+        # compute output size
+        deconv_out = self.deconvs(torch.zeros(1, self.channels, self.initial_len))
+        final_len = deconv_out.size(-1)
+        
+        self.finalLayer = nn.Linear(in_features=final_len, out_features=L)
+        
+
+    def forward(self, x, y=None):
+        x = self.mask(x, y)
+        x = self.FC(x)
+        x = x.view(-1, self.channels, self.initial_len)
+        x = self.deconvs(x).squeeze(1)
+        x = self.finalLayer(x)
+        return x
+
+    # choose only the predicted class vector
+    def mask(self, x, y=None):    # x: [batch, nCaps, capsDim]
+        if self.training and y != None:
+            return x[torch.arange(x.size(0)), y]
+            
+        norms = torch.norm(x, dim=-1)
+        pred_vector = torch.argmax(norms, dim=1)
+        predictions = x[torch.arange(x.size(0)), pred_vector]   #[batch, pred_vector=(capsDim)]
+        return predictions
+
+
+# ------------------------------------------------------------------------------------------------------------------
+
+class TimeCaps(pl.LightningModule):
+    def __init__(self, L, k, n, g1, g2, g3, cp, ap, cSA, aSA, cb, ab, cSB, aSB, routingIterations, n_classes):
+        super().__init__()
+    
+        self.encoder = Encoder(L, k, n, g1, g2, g3, cp, ap, cSA, aSA, cb, ab, cSB, aSB, routingIterations, n_classes)
+        self.decoder = Decoder(capsDim=16, L=L)
+    
+        self.test_targets = []
+        self.test_preds = []
+
+    
+    def forward(self, x):
+        x = self.encoder(x)
+        x = self.decoder(x)
+        return x     
+        
+
+    def configure_optimizers(self):
+        return optim.Adam(self.parameters(), lr=0.001, weight_decay=1e-6) 
+
     # margin loss
     def lossF(self, out, y, m_plus=0.8, m_minus=0.2, λ=0.5):
         y_onehot = F.one_hot(y, num_classes=out.size(1)).float()
@@ -202,49 +271,31 @@ class TimeCaps(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch
         x = x.view(x.size(0), -1)
-        out = self(x)
         
-        loss = self.lossF(out, y)
-        self.log("train_loss", loss, on_step=False, on_epoch=True)
+        # classification
+        out = self.encoder(x)
+        
+        class_loss = self.lossF(out, y)
+        self.log("class_loss", class_loss, on_step=False, on_epoch=True)
 
         preds = torch.norm(out, dim=-1).argmax(dim=1)
         acc = (preds == y).float().mean()
-        self.log("train_acc", acc, on_step=False, on_epoch=True)
+        self.log("acc", acc, on_step=False, on_epoch=True)
+
+        # reconstruction
+        out_signal = self.decoder(out, y)
+        recon_loss = F.mse_loss(out_signal, x)
+        self.log("recon_loss", recon_loss, on_step=False, on_epoch=True)
+
+        loss = class_loss + 0.05 * recon_loss
 
         return loss   
         
     def on_train_epoch_end(self):
         if (self.current_epoch % 10 == 0):
-            avg_loss = self.trainer.callback_metrics["train_loss"].item()
-            train_acc = self.trainer.callback_metrics["train_acc"].item()
-            print(f"Epoch: {self.current_epoch}, Loss: {avg_loss:.4f}, Accuracy: {train_acc*100:.2f}%")
+            class_loss = self.trainer.callback_metrics["class_loss"].item()
+            acc = self.trainer.callback_metrics["acc"].item()
+            recon_loss = self.trainer.callback_metrics["recon_loss"].item()
+            print(f"Epoch: {self.current_epoch}, Classification Loss: {class_loss:.4f}, Accuracy: {acc*100:.2f}%, Reconstruction Loss: {recon_loss:.4f}")
 
-
-# ------------------- Test ---------------------------------------------
-    def test_step(self, batch, batch_idx):
-        x, y = batch
-        out = self(x)  # [batch, capsNum, capsDim]
-        
-        # loss
-        loss = self.lossF(out, y)
-        self.log("test_loss", loss)  
-        
-        # acc
-        preds = torch.norm(out, dim=-1).argmax(dim=1)
-        acc = (preds == y).float().mean()
-        self.log("test_acc", acc)
-
-        self.test_preds.extend(preds.cpu().numpy())  # report rabi np objekt na cpu
-        self.test_targets.extend(y.cpu().numpy())
-        
-
-    def on_test_epoch_end(self):
-        test_loss = self.trainer.callback_metrics["test_loss"].item()
-        test_acc = self.trainer.callback_metrics["test_acc"].item()
-        print(f"Loss: {test_loss:.4f}")
-        print(f"Accuracy: {test_acc*100:.2f}%")
-
-        report = classification_report(self.test_targets, self.test_preds, digits=4)
-        print("\n=== Classification Report ===")
-        print(report)
 
