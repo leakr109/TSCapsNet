@@ -296,6 +296,42 @@ class TimeCaps(pl.LightningModule):
             class_loss = self.trainer.callback_metrics["class_loss"].item()
             acc = self.trainer.callback_metrics["acc"].item()
             recon_loss = self.trainer.callback_metrics["recon_loss"].item()
-            print(f"Epoch: {self.current_epoch}, Classification Loss: {class_loss:.4f}, Accuracy: {acc*100:.2f}%, Reconstruction Loss: {recon_loss:.4f}")
+            print(f"Epoch: {self.current_epoch}, Class_Loss: {class_loss:.4f}, Accuracy: {acc*100:.2f}%, Recon_Loss: {recon_loss:.4f}")
 
+
+# ------------------- Test ---------------------------------------------
+    def test_step(self, batch, batch_idx):
+        x, y = batch
+        x = x.view(x.size(0), -1)
+        
+        # classification
+        out = self.encoder(x)
+        
+        class_loss = self.lossF(out, y)
+        self.log("class_loss", class_loss, on_step=False, on_epoch=True)
+
+        preds = torch.norm(out, dim=-1).argmax(dim=1)
+        acc = (preds == y).float().mean()
+        self.log("acc", acc, on_step=False, on_epoch=True)
+
+        # reconstruction
+        out_signal = self.decoder(out, y)
+        recon_loss = F.mse_loss(out_signal, x)
+        self.log("recon_loss", recon_loss, on_step=False, on_epoch=True)
+
+        self.test_preds.extend(preds.cpu().numpy())
+        self.test_targets.extend(y.cpu().numpy())
+        
+
+    def on_test_epoch_end(self):
+        class_loss = self.trainer.callback_metrics["class_loss"].item()
+        acc = self.trainer.callback_metrics["acc"].item()
+        recon_loss = self.trainer.callback_metrics["recon_loss"].item()
+        print(f"Classification Loss: {class_loss:.4f}")
+        print(f"Accuracy: {acc*100:.2f}%")
+        print(f"Reconstruction Loss: {class_loss:.4f}")
+
+        report = classification_report(self.test_targets, self.test_preds, digits=4)
+        print("\n=== Classification Report ===")
+        print(report)
 
