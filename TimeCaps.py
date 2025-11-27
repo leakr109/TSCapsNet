@@ -195,12 +195,11 @@ class Decoder(nn.Module):
             nn.Linear(in_features=512, out_features=1024), nn.ReLU()
         )
 
-        # reshape to (batch, channels=32, length=32)
         self.channels = 32
-        self.initial_len = 32
+        self.channel_len = 32
 
-        # decoder CNN (upsample → conv)
-        self.deconvs = nn.Sequential(
+        # convolutional layers
+        self.convs = nn.Sequential(
             nn.Upsample(scale_factor=2, mode="linear", align_corners=False),
             nn.Conv1d(32, 32, kernel_size=5, padding=2), nn.ReLU(),
 
@@ -212,8 +211,8 @@ class Decoder(nn.Module):
         )
 
         # compute output size
-        deconv_out = self.deconvs(torch.zeros(1, self.channels, self.initial_len))
-        final_len = deconv_out.size(-1)
+        convs_out = self.convs(torch.zeros(1, self.channels, self.channel_len))
+        final_len = convs_out.size(-1)
         
         self.finalLayer = nn.Linear(in_features=final_len, out_features=L)
         
@@ -221,8 +220,8 @@ class Decoder(nn.Module):
     def forward(self, x, y=None):
         x = self.mask(x, y)
         x = self.FC(x)
-        x = x.view(-1, self.channels, self.initial_len)
-        x = self.deconvs(x).squeeze(1)
+        x = x.view(-1, self.channels, self.channel_len)
+        x = self.convs(x).squeeze(1)
         x = self.finalLayer(x)
         return x
 
